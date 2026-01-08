@@ -1,0 +1,47 @@
+@import "tailwindcss";
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap");
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  font-family: "Space Grotesk", "Segoe UI", sans-serif;
+  @apply bg-slate-50 text-slate-900;
+  background-image: radial-gradient(
+    circle at top right,
+    rgba(148, 163, 184, 0.15),
+    rgba(248, 250, 252, 0.9) 45%,
+    rgba(255, 255, 255, 1) 70%
+  );
+}
+
+* {
+  @apply border-slate-200;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.fade-in-up {
+  animation: fade-in-up 0.4s ease-out;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  @apply outline-none ring-2 ring-slate-900 ring-offset-2 ring-offset-white;
+}
