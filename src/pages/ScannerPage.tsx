@@ -69,7 +69,6 @@ export function ScannerPage() {
     const dateKey = getDateKey();
     await addDoc(collection(db, "attendance"), {
       userId: user.uid,
-      userEmail: profile.email,
       userName: profile.name ?? "User",
       siteId: locationItem?.id ?? "unknown",
       siteName: locationItem?.name ?? "Unknown",
@@ -86,7 +85,7 @@ export function ScannerPage() {
       createdAt: serverTimestamp(),
       searchPrefixes: buildSearchPrefixes([
         profile.name ?? "User",
-        profile.email,
+        profile.userId ?? user.uid,
         locationItem?.name ?? "Unknown",
       ]),
     });
@@ -210,8 +209,14 @@ export function ScannerPage() {
     const abnormalReasons: string[] = [];
     if (!checkInTime) abnormalReasons.push("Missing check-in");
     if (!checkOutTime) abnormalReasons.push("Missing check-out");
-    if (totalHoursRounded !== null && totalHoursRounded < 9) {
-      abnormalReasons.push("Total hours < 9");
+    if (totalHoursAdjusted !== null && totalHoursAdjusted < 8) {
+      abnormalReasons.push("Total hours < 8");
+    }
+    if (
+      checkOutMinutes !== null &&
+      checkOutMinutes < 17 * 60 - earlyCheckoutBufferMinutes
+    ) {
+      abnormalReasons.push("Checkout before 5pm buffer");
     }
 
     const otEarlyWindowStart = 22 * 60 - otEarlyBufferMinutes;
@@ -232,7 +237,7 @@ export function ScannerPage() {
     let otHours = 0;
     if (
       totalHoursRounded !== null &&
-      totalHoursRounded >= 9 &&
+      totalHoursRounded >= 8 &&
       effectiveOtCheckoutMinutes !== null
     ) {
       if (effectiveOtCheckoutMinutes >= 22 * 60) {
@@ -245,7 +250,7 @@ export function ScannerPage() {
     const isAbnormal = abnormalReasons.length > 0;
     const normalHours =
       !isAbnormal && totalHoursRounded !== null
-        ? Number(Math.min(totalHoursRounded, 9).toFixed(2))
+        ? Number(Math.min(totalHoursRounded, 8).toFixed(2))
         : null;
     const otHoursRounded = !isAbnormal ? otHours : null;
     const status = checkInTime && checkOutTime ? "complete" : "incomplete";
@@ -272,7 +277,6 @@ export function ScannerPage() {
     const sessionRef = doc(collection(db, "attendanceSessions"));
     batch.set(sessionRef, {
       userId: user.uid,
-      userEmail: profile.email,
       userName: profile.name ?? "User",
       siteId: siteInId ?? siteOutId ?? null,
       siteName: siteInName ?? siteOutName ?? null,
@@ -298,8 +302,7 @@ export function ScannerPage() {
       abnormalNote: null,
       searchPrefixes: buildSearchPrefixes([
         profile.name ?? "User",
-        profile.email,
-        profile.employeeId ?? "",
+        profile.userId ?? user.uid,
       ]),
     });
 
@@ -407,7 +410,6 @@ export function ScannerPage() {
 
       await addDoc(collection(db, "attendance"), {
         userId: user.uid,
-        userEmail: profile.email,
         userName: profile.name ?? "User",
         siteId: locationItem.id,
         siteName: locationItem.name,
@@ -424,7 +426,7 @@ export function ScannerPage() {
         createdAt: serverTimestamp(),
         searchPrefixes: buildSearchPrefixes([
           profile.name ?? "User",
-          profile.email,
+          profile.userId ?? user.uid,
           locationItem.name,
         ]),
       });

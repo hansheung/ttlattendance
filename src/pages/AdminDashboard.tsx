@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from "react";
-import { sendPasswordResetEmail } from "firebase/auth";
 import {
   addDoc,
   collection,
@@ -25,7 +24,7 @@ import {
 import { httpsCallable } from "firebase/functions";
 import { format, formatISO, subDays } from "date-fns";
 import { ArrowDown, ArrowUp, ArrowUpDown, Pencil, Trash2 } from "lucide-react";
-import { auth, db, functions } from "../lib/firebase";
+import { db, functions } from "../lib/firebase";
 import { useAuth } from "../contexts/AuthContext";
 import {
   buildSearchPrefixes,
@@ -167,7 +166,6 @@ const buildAuditSnapshot = (log: AttendanceLogAuditInput | null) => {
   if (!log) return null;
   return {
     userId: log.userId,
-    userEmail: log.userEmail,
     siteId: log.siteId,
     siteName: log.siteName,
     scanTime: log.scanTime,
@@ -248,7 +246,6 @@ const recomputeSessionsForRange = async ({
       scanType?: "check-in" | "check-out";
       scanTime: Date;
       userId: string;
-      userEmail: string;
       siteId: string;
       siteName: string;
       dateKey: string;
@@ -266,7 +263,6 @@ const recomputeSessionsForRange = async ({
       scanType: data.scanType ?? "check-in",
       scanTime,
       userId: data.userId,
-      userEmail: data.userEmail,
       siteId: data.siteId,
       siteName: data.siteName,
       dateKey,
@@ -321,17 +317,23 @@ const recomputeSessionsForRange = async ({
       const bufferMinutes = Math.max(17 * 60 - checkOutMinutes, 0);
       totalHoursAdjusted += bufferMinutes / 60;
     }
-    const totalHoursRounded =
-      totalHoursAdjusted !== null
-        ? Number(totalHoursAdjusted.toFixed(2))
-        : null;
+      const totalHoursRounded =
+        totalHoursAdjusted !== null
+          ? Number(totalHoursAdjusted.toFixed(2))
+          : null;
 
     const abnormalReasons: string[] = [];
     if (!checkInTime) abnormalReasons.push("Missing check-in");
     if (!checkOutTime) abnormalReasons.push("Missing check-out");
-    if (totalHoursRounded !== null && totalHoursRounded < 9) {
-      abnormalReasons.push("Total hours < 9");
-    }
+      if (totalHoursAdjusted !== null && totalHoursAdjusted < 8) {
+        abnormalReasons.push("Total hours < 8");
+      }
+      if (
+        checkOutMinutes !== null &&
+        checkOutMinutes < 17 * 60 - earlyCheckoutBufferMinutes
+      ) {
+        abnormalReasons.push("Checkout before 5pm buffer");
+      }
 
     const otEarlyWindowStart = 22 * 60 - otEarlyBufferMinutes;
     const otLateWindowEnd = 22 * 60 + otLateBufferMinutes;
@@ -348,12 +350,12 @@ const recomputeSessionsForRange = async ({
         abnormalReasons.push("Checkout after 10pm");
       }
 
-    let otHours = 0;
-    if (
-      totalHoursRounded !== null &&
-      totalHoursRounded >= 9 &&
-      effectiveOtCheckoutMinutes !== null
-    ) {
+      let otHours = 0;
+      if (
+        totalHoursRounded !== null &&
+        totalHoursRounded >= 8 &&
+        effectiveOtCheckoutMinutes !== null
+      ) {
       if (effectiveOtCheckoutMinutes >= 22 * 60) {
         otHours = 4;
       } else if (effectiveOtCheckoutMinutes >= 19 * 60) {
@@ -369,16 +371,15 @@ const recomputeSessionsForRange = async ({
       : null;
 
     const isAbnormal = abnormalReasons.length > 0;
-    const normalHours =
-      !isAbnormal && totalHoursRounded !== null
-        ? Number(Math.min(totalHoursRounded, 9).toFixed(2))
-        : null;
+      const normalHours =
+        !isAbnormal && totalHoursRounded !== null
+          ? Number(Math.min(totalHoursRounded, 8).toFixed(2))
+          : null;
     const otHoursRounded = !isAbnormal ? otHours : null;
     const status = checkInTime && checkOutTime ? "complete" : "incomplete";
 
     const userItem = userMap[userId];
     const userName = userItem?.name ?? "User";
-    const userEmail = userItem?.email ?? list[0].userEmail;
     const normalRate = userItem?.normalRate ?? 0;
     const otRate = userItem?.otRate ?? 0;
     const amountRM = isAbnormal
@@ -400,7 +401,6 @@ const recomputeSessionsForRange = async ({
     const sessionRef = doc(collection(db, "attendanceSessions"));
     batch.set(sessionRef, {
       userId,
-      userEmail,
       userName,
       siteId: siteInId ?? siteOutId ?? null,
       siteName: siteInName ?? siteOutName ?? null,
@@ -426,8 +426,7 @@ const recomputeSessionsForRange = async ({
       abnormalNote: null,
       searchPrefixes: buildSearchPrefixes([
         userName,
-        userEmail,
-        userItem?.employeeId ?? "",
+        userId,
       ]),
     });
 
@@ -447,6 +446,50 @@ export function AdminDashboard() {
   const [siteSearch, setSiteSearch] = useState("");
   const [sitePageSize, setSitePageSize] = useState<number>(30);
   const [sitePageIndex, setSitePageIndex] = useState(0);
+  const idleTimeoutMs = 2 * 60 * 60 * 1000;
+
+  useEffect(() => {
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    const resetIdleTimer = () => {
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+      }
+      idleTimer = setTimeout(() => {
+        void logout();
+      }, idleTimeoutMs);
+    };
+
+    const handlePageHide = () => {
+      void logout();
+    };
+
+    const activityEvents: Array<keyof WindowEventMap> = [
+      "mousemove",
+      "mousedown",
+      "keydown",
+      "scroll",
+      "touchstart",
+      "click",
+    ];
+
+    activityEvents.forEach((eventName) => {
+      window.addEventListener(eventName, resetIdleTimer, { passive: true });
+    });
+    window.addEventListener("pagehide", handlePageHide);
+    window.addEventListener("beforeunload", handlePageHide);
+    resetIdleTimer();
+
+    return () => {
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+      }
+      activityEvents.forEach((eventName) => {
+        window.removeEventListener(eventName, resetIdleTimer);
+      });
+      window.removeEventListener("pagehide", handlePageHide);
+      window.removeEventListener("beforeunload", handlePageHide);
+    };
+  }, [logout, idleTimeoutMs]);
 
   useEffect(() => {
     const fetchLocations = async () => {
@@ -464,11 +507,12 @@ export function AdminDashboard() {
 
   const refreshUsers = async () => {
     const snapshot = await getDocs(
-      query(collection(db, "users"), orderBy("email", "asc")),
+      query(collection(db, "users"), orderBy("userId", "asc")),
     );
     const items = snapshot.docs.map((docSnap) => ({
       uid: docSnap.id,
       ...(docSnap.data() as Omit<UserProfile, "uid">),
+      userId: docSnap.data().userId ?? docSnap.id,
     }));
     setUsers(items);
   };
@@ -662,15 +706,16 @@ export function AdminDashboard() {
                           <TableCell className="flex flex-wrap gap-2">
                             <Button
                               variant="outline"
-                              size="sm"
+                              size="icon"
                               onClick={() => handleEdit(locationItem)}
+                              aria-label={`Edit ${locationItem.name}`}
                             >
-                              Edit
+                              <Pencil className="h-4 w-4" />
                             </Button>
                             <AlertDialog>
                               <AlertDialogTrigger asChild>
-                                <Button variant="destructive" size="sm">
-                                  Delete
+                                <Button variant="destructive" size="icon" aria-label={`Delete ${locationItem.name}`}>
+                                  <Trash2 className="h-4 w-4" />
                                 </Button>
                               </AlertDialogTrigger>
                               <AlertDialogContent>
@@ -873,7 +918,6 @@ function AttendanceLogsPanel({
   const [statusFilter, setStatusFilter] = useState("all");
   const [typeFilter, setTypeFilter] = useState("all");
   const [locationFilter, setLocationFilter] = useState("all");
-  const [userFilter, setUserFilter] = useState("all");
   const [logPageSize, setLogPageSize] = useState<number>(30);
   const [dateStart, setDateStart] = useState("");
   const [dateEnd, setDateEnd] = useState("");
@@ -972,7 +1016,7 @@ function AttendanceLogsPanel({
       logId,
       action,
       adminId: adminUser.uid,
-      adminEmail: adminProfile.email,
+      adminUserId: adminProfile.userId ?? adminUser.uid,
       createdAt: serverTimestamp(),
       before: buildAuditSnapshot(before),
       after: buildAuditSnapshot(after),
@@ -1016,7 +1060,7 @@ function AttendanceLogsPanel({
       const dateKey = getDateKey(scanDate, TIME_ZONE);
       const searchPrefixes = buildSearchPrefixes([
         userItem.name ?? "",
-        userItem.email,
+        userItem.userId ?? userItem.uid,
         locationItem.name,
       ]);
       const latValue = logForm.userLat.trim();
@@ -1035,7 +1079,6 @@ function AttendanceLogsPanel({
 
       const commonPayload = {
         userId: userItem.uid,
-        userEmail: userItem.email,
         siteId: locationItem.id,
         siteName: locationItem.name,
         scanTime: scanTimestamp,
@@ -1061,7 +1104,6 @@ function AttendanceLogsPanel({
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
           updatedBy: adminUser.uid,
-          updatedByEmail: adminProfile.email,
         };
         batch.set(logRef, newLog);
         writeAuditEntries(batch, logRef.id, "create", null, newLog);
@@ -1077,7 +1119,6 @@ function AttendanceLogsPanel({
               : editingLog.failReason ?? "Manual entry",
           updatedAt: serverTimestamp(),
           updatedBy: adminUser.uid,
-          updatedByEmail: adminProfile.email,
         };
         batch.update(logRef, updatePayload);
         writeAuditEntries(batch, logRef.id, "update", editingLog, {
@@ -1166,9 +1207,6 @@ function AttendanceLogsPanel({
     if (locationFilter !== "all") {
       constraints.push(where("siteId", "==", locationFilter));
     }
-    if (userFilter !== "all") {
-      constraints.push(where("userEmail", "==", userFilter));
-    }
 
     if (dateStart) {
       const startDate = new Date(dateStart);
@@ -1240,7 +1278,6 @@ function AttendanceLogsPanel({
     statusFilter,
     typeFilter,
     locationFilter,
-    userFilter,
     dateStart,
     dateEnd,
     logPageSize,
@@ -1263,7 +1300,7 @@ function AttendanceLogsPanel({
         </Button>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="grid gap-4 lg:grid-cols-5">
+        <div className="grid gap-4 lg:grid-cols-4">
           <div className="space-y-2">
             <Label>Search</Label>
             <Input
@@ -1272,7 +1309,7 @@ function AttendanceLogsPanel({
                 setSearch(event.target.value);
                 resetPagination();
               }}
-              placeholder="name or email"
+              placeholder="name or user ID"
             />
             {searchError ? (
               <p className="text-xs text-red-600">{searchError}</p>
@@ -1338,28 +1375,6 @@ function AttendanceLogsPanel({
               </SelectContent>
             </Select>
           </div>
-          <div className="space-y-2">
-            <Label>Email</Label>
-            <Select
-              value={userFilter}
-              onValueChange={(value) => {
-                setUserFilter(value);
-                resetPagination();
-              }}
-            >
-              <SelectTrigger>
-                <SelectValue placeholder="All" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All</SelectItem>
-                {users.map((userItem) => (
-                  <SelectItem key={userItem.uid} value={userItem.email}>
-                    {userItem.email}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
         </div>
 
         <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
@@ -1405,7 +1420,6 @@ function AttendanceLogsPanel({
                 setStatusFilter("all");
                 setTypeFilter("all");
                 setLocationFilter("all");
-                setUserFilter("all");
                 setDateStart("");
                 setDateEnd("");
                 resetPagination();
@@ -1469,7 +1483,7 @@ function AttendanceLogsPanel({
                 <TableHead>Date</TableHead>
                 <TableHead>Time</TableHead>
                 <TableHead>Name</TableHead>
-                <TableHead>User</TableHead>
+                <TableHead>User ID</TableHead>
                 <TableHead>Site</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Type</TableHead>
@@ -1483,7 +1497,7 @@ function AttendanceLogsPanel({
                   <TableCell>{format(log.scanTime.toDate(), "dd-MMM-yyyy")}</TableCell>
                   <TableCell>{format(log.scanTime.toDate(), "p")}</TableCell>
                   <TableCell>{userMap[log.userId]?.name ?? "-"}</TableCell>
-                  <TableCell>{log.userEmail}</TableCell>
+                  <TableCell>{log.userId}</TableCell>
                   <TableCell>{log.siteName}</TableCell>
                   <TableCell>
                     {log.status === "success" ? (
@@ -1608,9 +1622,9 @@ function AttendanceLogsPanel({
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label>Email</Label>
+                  <Label>User ID</Label>
                   <Input
-                    value={userMap[logForm.userId]?.email ?? ""}
+                    value={userMap[logForm.userId]?.userId ?? logForm.userId}
                     readOnly
                     className="bg-slate-50"
                   />
@@ -1618,7 +1632,7 @@ function AttendanceLogsPanel({
               </div>
             ) : (
               <div className="space-y-2">
-                <Label>User</Label>
+                <Label>User ID</Label>
                 <Select
                   value={logForm.userId}
                   onValueChange={(value) =>
@@ -1631,7 +1645,7 @@ function AttendanceLogsPanel({
                   <SelectContent>
                     {users.map((userItem) => (
                       <SelectItem key={userItem.uid} value={userItem.uid}>
-                        {userItem.email}
+                        {userItem.userId ?? userItem.uid}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -1867,6 +1881,16 @@ function SessionsPanel({
   const [recomputeStatus, setRecomputeStatus] = useState<string | null>(null);
   const [recomputeDialogOpen, setRecomputeDialogOpen] = useState(false);
   const [sessionPageSize, setSessionPageSize] = useState<number>(30);
+  const [sortKey, setSortKey] = useState<
+    | "userName"
+    | "userId"
+    | "date"
+    | "siteIn"
+    | "inTime"
+    | "siteOut"
+    | "outTime"
+  >("date");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
   const searchToken = useMemo(() => search.trim().toLowerCase(), [search]);
   const resetPagination = () => {
@@ -1888,6 +1912,9 @@ function SessionsPanel({
     }
     if (statusFilter === "abnormal") {
       constraints.push(where("isAbnormal", "==", true));
+    } else if (statusFilter === "complete") {
+      constraints.push(where("status", "==", "complete"));
+      constraints.push(where("isAbnormal", "==", false));
     } else if (statusFilter !== "all") {
       constraints.push(where("status", "==", statusFilter));
     }
@@ -1903,6 +1930,75 @@ function SessionsPanel({
     }
 
     return query(collection(db, "attendanceSessions"), ...constraints);
+  };
+
+  const resolveSortValue = (
+    session: AttendanceSession,
+    key: typeof sortKey,
+  ) => {
+    switch (key) {
+      case "userName":
+        return session.userName ?? "";
+      case "userId":
+        return session.userId ?? "";
+      case "siteIn":
+        return session.siteInName ?? session.siteName ?? "";
+      case "siteOut":
+        return session.siteOutName ?? session.siteName ?? "";
+      case "inTime":
+        return session.checkInTime ? session.checkInTime.toMillis() : 0;
+      case "outTime":
+        return session.checkOutTime ? session.checkOutTime.toMillis() : 0;
+      case "date":
+      default:
+        if (session.checkInTime) {
+          return session.checkInTime.toMillis();
+        }
+        if (session.dateKey) {
+          const parsed = new Date(`${session.dateKey}T00:00:00`);
+          return Number.isNaN(parsed.getTime()) ? 0 : parsed.getTime();
+        }
+        return 0;
+    }
+  };
+
+  const sortedSessions = useMemo(() => {
+    const sorted = [...sessions];
+    sorted.sort((a, b) => {
+      const aValue = resolveSortValue(a, sortKey);
+      const bValue = resolveSortValue(b, sortKey);
+      if (typeof aValue === "number" && typeof bValue === "number") {
+        return sortDir === "asc" ? aValue - bValue : bValue - aValue;
+      }
+      const aStr = String(aValue ?? "").toLowerCase();
+      const bStr = String(bValue ?? "").toLowerCase();
+      return sortDir === "asc"
+        ? aStr.localeCompare(bStr)
+        : bStr.localeCompare(aStr);
+    });
+    return sorted;
+  }, [sessions, sortDir, sortKey]);
+
+  const toggleSort = (key: typeof sortKey) => {
+    if (sortKey === key) {
+      setSortDir((prev) => (prev === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir("asc");
+    }
+  };
+
+  const sortIndicator = (key: typeof sortKey) => {
+    if (sortKey !== key) {
+      return (
+        <ArrowUpDown className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
+      );
+    }
+    return sortDir === "asc" ? (
+      <ArrowUp className="h-3.5 w-3.5 text-slate-600" aria-hidden="true" />
+    ) : (
+      <ArrowDown className="h-3.5 w-3.5 text-slate-600" aria-hidden="true" />
+    );
   };
 
   const loadSessions = async () => {
@@ -1981,7 +2077,7 @@ function SessionsPanel({
       }));
       const headers = [
         "Name",
-        "Email",
+        "User ID",
         "Date",
         "Site In",
         "In",
@@ -2004,7 +2100,7 @@ function SessionsPanel({
             : "";
           const values = [
             row.userName,
-            row.userEmail,
+            row.userId,
             formatDateKeyLabel(row.dateKey),
             row.siteInName ?? row.siteName ?? "",
             checkIn,
@@ -2080,14 +2176,14 @@ function SessionsPanel({
         <CardContent className="space-y-4">
           <div className="grid gap-4 lg:grid-cols-12">
             <div className="space-y-2 lg:col-span-4">
-              <Label>Search Name or Email</Label>
+              <Label>Search Name or User ID</Label>
               <Input
                 value={search}
                 onChange={(event) => {
                   setSearch(event.target.value);
                   resetPagination();
                 }}
-                placeholder="name or email"
+                placeholder="name or user ID"
               />
               {searchError ? (
                 <p className="text-xs text-red-600">{searchError}</p>
@@ -2152,7 +2248,6 @@ function SessionsPanel({
                 <SelectContent>
                   <SelectItem value="all">All</SelectItem>
                   <SelectItem value="complete">Complete</SelectItem>
-                  <SelectItem value="incomplete">Incomplete</SelectItem>
                   <SelectItem value="abnormal">Abnormal</SelectItem>
                 </SelectContent>
               </Select>
@@ -2210,13 +2305,55 @@ function SessionsPanel({
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Email</TableHead>
-                  <TableHead>Date</TableHead>
-                  <TableHead>Site-in</TableHead>
-                  <TableHead>In</TableHead>
-                  <TableHead>Site-out</TableHead>
-                  <TableHead>Out</TableHead>
+                  <TableHead>
+                    <button type="button" onClick={() => toggleSort("userName")}>
+                      <span className="inline-flex items-center gap-1">
+                        Name {sortIndicator("userName")}
+                      </span>
+                    </button>
+                  </TableHead>
+                  <TableHead>
+                    <button type="button" onClick={() => toggleSort("userId")}>
+                      <span className="inline-flex items-center gap-1">
+                        User ID {sortIndicator("userId")}
+                      </span>
+                    </button>
+                  </TableHead>
+                  <TableHead>
+                    <button type="button" onClick={() => toggleSort("date")}>
+                      <span className="inline-flex items-center gap-1">
+                        Date {sortIndicator("date")}
+                      </span>
+                    </button>
+                  </TableHead>
+                  <TableHead>
+                    <button type="button" onClick={() => toggleSort("siteIn")}>
+                      <span className="inline-flex items-center gap-1">
+                        Site-in {sortIndicator("siteIn")}
+                      </span>
+                    </button>
+                  </TableHead>
+                  <TableHead>
+                    <button type="button" onClick={() => toggleSort("inTime")}>
+                      <span className="inline-flex items-center gap-1">
+                        In {sortIndicator("inTime")}
+                      </span>
+                    </button>
+                  </TableHead>
+                  <TableHead>
+                    <button type="button" onClick={() => toggleSort("siteOut")}>
+                      <span className="inline-flex items-center gap-1">
+                        Site-out {sortIndicator("siteOut")}
+                      </span>
+                    </button>
+                  </TableHead>
+                  <TableHead>
+                    <button type="button" onClick={() => toggleSort("outTime")}>
+                      <span className="inline-flex items-center gap-1">
+                        Out {sortIndicator("outTime")}
+                      </span>
+                    </button>
+                  </TableHead>
                   <TableHead>Total Hours</TableHead>
                   <TableHead>Normal</TableHead>
                   <TableHead>OT</TableHead>
@@ -2225,10 +2362,10 @@ function SessionsPanel({
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {sessions.map((session) => (
+                {sortedSessions.map((session) => (
                   <TableRow key={session.id}>
                     <TableCell>{session.userName}</TableCell>
-                    <TableCell>{session.userEmail}</TableCell>
+                    <TableCell>{session.userId}</TableCell>
                     <TableCell>{formatDateKeyLabel(session.dateKey)}</TableCell>
                     <TableCell>{session.siteInName ?? "-"}</TableCell>
                       <TableCell>
@@ -2386,23 +2523,23 @@ function SessionsPanel({
 }
 
 type UserFormState = {
+  userId: string;
   name: string;
-  email: string;
-  position: string;
-  employeeId: string;
+  phone: string;
+  passport: string;
   normalRate: string;
   otRate: string;
-  tempPassword: string;
+  password: string;
 };
 
 const emptyUserForm: UserFormState = {
+  userId: "",
   name: "",
-  email: "",
-  position: "",
-  employeeId: "",
+  phone: "",
+  passport: "",
   normalRate: "",
   otRate: "",
-  tempPassword: "",
+  password: "",
 };
 
 function UsersPanel({
@@ -2417,7 +2554,7 @@ function UsersPanel({
     const [pageIndex, setPageIndex] = useState(0);
     const [sortKey, setSortKey] = useState<keyof Pick<
       UserProfile,
-      "name" | "email" | "position" | "employeeId" | "normalRate" | "otRate"
+      "name" | "userId" | "normalRate" | "otRate"
     >>("name");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -2425,9 +2562,14 @@ function UsersPanel({
   const [form, setForm] = useState<UserFormState>(emptyUserForm);
   const [status, setStatus] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [showFormPassword, setShowFormPassword] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<UserProfile | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [resetStatus, setResetStatus] = useState<string | null>(null);
+  const [resetPassword, setResetPassword] = useState("");
+  const [showResetPassword, setShowResetPassword] = useState(false);
+  const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
+  const isAdminEdit = Boolean(editingUser?.isAdmin);
 
   const activeUsers = useMemo(
     () => users.filter((user) => !user.isDeleted),
@@ -2439,13 +2581,8 @@ function UsersPanel({
     if (!searchToken) return activeUsers;
     return activeUsers.filter((user) => {
       const name = user.name?.toLowerCase() ?? "";
-      const email = user.email?.toLowerCase() ?? "";
-      const employeeId = user.employeeId?.toLowerCase() ?? "";
-      return (
-        name.includes(searchToken) ||
-        email.includes(searchToken) ||
-        employeeId.includes(searchToken)
-      );
+      const userId = (user.userId ?? user.uid).toLowerCase();
+      return name.includes(searchToken) || userId.includes(searchToken);
     });
   }, [activeUsers, searchToken]);
 
@@ -2487,7 +2624,7 @@ function UsersPanel({
   const toggleSort = (
     key: keyof Pick<
       UserProfile,
-      "name" | "email" | "position" | "employeeId" | "normalRate" | "otRate"
+      "name" | "userId" | "normalRate" | "otRate"
     >,
   ) => {
     if (sortKey === key) {
@@ -2502,23 +2639,30 @@ function UsersPanel({
     setEditingUser(null);
     setForm(emptyUserForm);
     setStatus(null);
+    setShowFormPassword(false);
+    setResetStatus(null);
+    setResetPassword("");
+    setShowResetPassword(false);
     setDialogOpen(true);
   };
 
   const openEdit = (user: UserProfile) => {
     setEditingUser(user);
     setForm({
+      userId: user.userId ?? user.uid,
       name: user.name ?? "",
-      email: user.email ?? "",
-      position: user.position ?? "",
-      employeeId: user.employeeId ?? "",
+      phone: user.phone ?? "",
+      passport: user.passport ?? "",
       normalRate:
         typeof user.normalRate === "number" ? user.normalRate.toString() : "",
       otRate: typeof user.otRate === "number" ? user.otRate.toString() : "",
-      tempPassword: "",
+      password: "",
     });
     setStatus(null);
     setResetStatus(null);
+    setShowFormPassword(false);
+    setResetPassword(user.isAdmin ? "" : user.displayPassword ?? "");
+    setShowResetPassword(!user.isAdmin);
     setDialogOpen(true);
   };
 
@@ -2527,17 +2671,80 @@ function UsersPanel({
     setDeleteOpen(true);
   };
 
+  const handleResetPassword = async () => {
+    if (!editingUser) return;
+    const nextPassword = resetPassword.trim();
+    if (nextPassword.length < 6) {
+      setResetStatus("Password must be at least 6 characters.");
+      return;
+    }
+    setResetStatus(null);
+    try {
+      const setPassword = httpsCallable(functions, "adminSetUserPassword");
+      await setPassword({ uid: editingUser.uid, password: nextPassword });
+      setResetStatus("Password updated.");
+      setResetPassword("");
+    } catch (err: unknown) {
+      setResetStatus(
+        err instanceof Error ? err.message : "Unable to update password.",
+      );
+    }
+  };
+
+  const handleExportCsv = () => {
+    if (selectedUserIds.length === 0) return;
+    const selectedUsers = activeUsers.filter(
+      (item) => selectedUserIds.includes(item.uid) && !item.isAdmin,
+    );
+    if (selectedUsers.length === 0) return;
+    const headers = ["Name", "User ID", "Password", "Phone", "Passport"];
+    const csvRows = [
+      headers.join(","),
+      ...selectedUsers.map((user) =>
+        [
+          user.name ?? "",
+          user.userId ?? user.uid,
+          user.displayPassword ?? "",
+          user.phone ?? "",
+          user.passport ?? "",
+        ]
+          .map((value) => `"${String(value).replace(/"/g, '""')}"`)
+          .join(","),
+      ),
+    ];
+    const blob = new Blob([csvRows.join("\n")], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "users-selected.csv";
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
   const handleSave = async () => {
     if (saving) return;
     setStatus(null);
+    const userId = form.userId.trim();
     const name = form.name.trim();
-    const email = form.email.trim().toLowerCase();
-    const employeeId = form.employeeId.trim();
+    const phone = form.phone.trim();
+    const passport = form.passport.trim();
     const normalRate = Number(form.normalRate);
     const otRate = Number(form.otRate);
 
-    if (!name || !email || !employeeId) {
-      setStatus("Name, email, and employee ID are required.");
+    if (!userId || !name) {
+      setStatus("User ID and name are required.");
+      return;
+    }
+    if (!/^[a-zA-Z0-9]{4,20}$/.test(userId)) {
+      setStatus("User ID must be 4-20 letters or numbers.");
+      return;
+    }
+    if (!editingUser && form.password.trim().length < 6) {
+      setStatus("Password must be at least 6 characters.");
+      return;
+    }
+    if (editingUser && userId.toLowerCase() !== editingUser.uid.toLowerCase()) {
+      setStatus("User ID cannot be changed.");
       return;
     }
     if (Number.isNaN(normalRate) || normalRate < 0) {
@@ -2548,13 +2755,13 @@ function UsersPanel({
       setStatus("OT rate must be a valid number.");
       return;
     }
-    const duplicateEmployeeId = activeUsers.find(
+    const duplicateUserId = activeUsers.find(
       (user) =>
-        user.employeeId?.toLowerCase() === employeeId.toLowerCase() &&
+        (user.userId ?? user.uid).toLowerCase() === userId.toLowerCase() &&
         user.uid !== editingUser?.uid,
     );
-    if (duplicateEmployeeId) {
-      setStatus("Employee ID must be unique.");
+    if (!editingUser && duplicateUserId) {
+      setStatus("User ID must be unique.");
       return;
     }
 
@@ -2563,19 +2770,20 @@ function UsersPanel({
       if (!editingUser) {
         const createUser = httpsCallable(functions, "adminCreateUser");
         await createUser({
+          userId,
           name,
-          email,
-          position: form.position.trim(),
-          employeeId,
+          phone,
+          passport,
           normalRate,
           otRate,
-          tempPassword: form.tempPassword.trim(),
+          password: form.password.trim(),
         });
       } else {
         await updateDoc(doc(db, "users", editingUser.uid), {
+          userId: editingUser.uid,
           name,
-          position: form.position.trim(),
-          employeeId,
+          phone: phone || null,
+          passport: passport || null,
           normalRate,
           otRate,
           updatedAt: serverTimestamp(),
@@ -2590,11 +2798,10 @@ function UsersPanel({
         const message = (err as { message?: string }).message ?? "";
         if (
           code === "already-exists" ||
-          code === "auth/email-already-exists" ||
-          /email.*already/i.test(message) ||
-          /auth\/email-already-exists/i.test(message)
+          code === "auth/uid-already-exists" ||
+          /user id.*already/i.test(message)
         ) {
-          setStatus("Email already exists.");
+          setStatus("User ID already exists.");
           return;
         }
       }
@@ -2609,7 +2816,7 @@ function UsersPanel({
     setStatus(null);
     try {
       const deleteUser = httpsCallable(functions, "adminDeleteUser");
-      await deleteUser({ uid: deleteTarget.uid, email: deleteTarget.email });
+      await deleteUser({ uid: deleteTarget.uid });
       await updateDoc(doc(db, "users", deleteTarget.uid), {
         isDeleted: true,
         deletedAt: serverTimestamp(),
@@ -2620,18 +2827,6 @@ function UsersPanel({
     } catch (err: unknown) {
       setStatus(
         err instanceof Error ? err.message : "Unable to delete user.",
-      );
-    }
-  };
-
-  const handleResetPassword = async (email: string) => {
-    setResetStatus(null);
-    try {
-      await sendPasswordResetEmail(auth, email);
-      setResetStatus(`Password reset email sent to ${email}.`);
-    } catch (err: unknown) {
-      setResetStatus(
-        err instanceof Error ? err.message : "Unable to send reset email.",
       );
     }
   };
@@ -2651,16 +2846,35 @@ function UsersPanel({
     <Card>
       <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <CardTitle>Users</CardTitle>
-        <Button onClick={openCreate}>+ Add User</Button>
+        <div className="flex flex-wrap gap-2">
+          <Button onClick={openCreate}>+ Add User</Button>
+          <Button
+            variant="outline"
+            onClick={handleExportCsv}
+            disabled={selectedUserIds.length === 0}
+            className="disabled:opacity-100"
+          >
+            Export CSV
+          </Button>
+        </div>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="space-y-2">
           <Label>Search</Label>
-          <Input
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="name, email, or employee ID"
-          />
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="name or user ID"
+            />
+            <Button
+              variant="outline"
+              onClick={() => setSelectedUserIds([])}
+              disabled={selectedUserIds.length === 0}
+            >
+              Clear Selection
+            </Button>
+          </div>
         </div>
         <Table>
           <TableHeader>
@@ -2673,25 +2887,17 @@ function UsersPanel({
                 </button>
               </TableHead>
               <TableHead>
-                <button type="button" onClick={() => toggleSort("email")}>
+                <button type="button" onClick={() => toggleSort("userId")}>
                   <span className="inline-flex items-center gap-1">
-                    Email {sortIndicator("email")}
+                    User ID {sortIndicator("userId")}
                   </span>
                 </button>
               </TableHead>
               <TableHead>
-                <button type="button" onClick={() => toggleSort("position")}>
-                  <span className="inline-flex items-center gap-1">
-                    Position {sortIndicator("position")}
-                  </span>
-                </button>
+                Phone
               </TableHead>
               <TableHead>
-                <button type="button" onClick={() => toggleSort("employeeId")}>
-                  <span className="inline-flex items-center gap-1">
-                    Employee ID {sortIndicator("employeeId")}
-                  </span>
-                </button>
+                Passport
               </TableHead>
               <TableHead>
                 <button type="button" onClick={() => toggleSort("normalRate")}>
@@ -2718,10 +2924,32 @@ function UsersPanel({
             ) : (
               pagedUsers.map((user) => (
                 <TableRow key={user.uid}>
-                  <TableCell>{user.name}</TableCell>
-                  <TableCell>{user.email}</TableCell>
-                  <TableCell>{user.position ?? "-"}</TableCell>
-                  <TableCell>{user.employeeId ?? "-"}</TableCell>
+                  <TableCell>
+                    <div className="flex items-center gap-2">
+                      {!user.isAdmin ? (
+                        <input
+                          type="checkbox"
+                          aria-label={`Select ${user.name ?? "user"} for export`}
+                          checked={selectedUserIds.includes(user.uid)}
+                          onChange={(event) => {
+                            const checked = event.target.checked;
+                            setSelectedUserIds((prev) => {
+                              if (checked) {
+                                return prev.includes(user.uid)
+                                  ? prev
+                                  : [...prev, user.uid];
+                              }
+                              return prev.filter((id) => id !== user.uid);
+                            });
+                          }}
+                        />
+                      ) : null}
+                      <span>{user.name}</span>
+                    </div>
+                  </TableCell>
+                  <TableCell>{user.userId ?? user.uid}</TableCell>
+                  <TableCell>{user.phone ?? "-"}</TableCell>
+                  <TableCell>{user.passport ?? "-"}</TableCell>
                   <TableCell>
                     {typeof user.normalRate === "number"
                       ? user.normalRate.toFixed(2)
@@ -2736,18 +2964,22 @@ function UsersPanel({
                     <div className="flex flex-wrap gap-2">
                       <Button
                         variant="outline"
-                        size="sm"
+                        size="icon"
                         onClick={() => openEdit(user)}
+                        aria-label={`Edit ${user.name ?? "user"}`}
                       >
-                        Edit
+                        <Pencil className="h-4 w-4" />
                       </Button>
-                      <Button
-                        variant="destructive"
-                        size="sm"
-                        onClick={() => openDelete(user)}
-                      >
-                        Delete
-                      </Button>
+                      {!user.isAdmin ? (
+                        <Button
+                          variant="destructive"
+                          size="icon"
+                          onClick={() => openDelete(user)}
+                          aria-label={`Delete ${user.name ?? "user"}`}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      ) : null}
                     </div>
                   </TableCell>
                 </TableRow>
@@ -2808,8 +3040,73 @@ function UsersPanel({
             <DialogTitle>{editingUser ? "Edit User" : "Add User"}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
-            {resetStatus ? (
-              <p className="text-sm text-slate-500">{resetStatus}</p>
+            <div className="space-y-2">
+              <Label>User ID</Label>
+              <Input
+                value={form.userId}
+                onChange={(event) =>
+                  setForm((prev) => ({ ...prev, userId: event.target.value }))
+                }
+                readOnly={Boolean(editingUser)}
+                className={editingUser ? "bg-slate-50" : undefined}
+              />
+            </div>
+            {!editingUser ? (
+              <div className="space-y-2">
+                <Label>Password</Label>
+                <div className="flex gap-2">
+                  <Input
+                    type={showFormPassword ? "text" : "password"}
+                    value={form.password}
+                    onChange={(event) =>
+                      setForm((prev) => ({
+                        ...prev,
+                        password: event.target.value,
+                      }))
+                    }
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => setShowFormPassword((value) => !value)}
+                  >
+                    {showFormPassword ? "Hide" : "Show"}
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+            {editingUser ? (
+              <div className="space-y-2">
+                <Label>{editingUser.isAdmin ? "New Password" : "Password"}</Label>
+                <div className="flex gap-2">
+                  <Input
+                    type={showResetPassword ? "text" : "password"}
+                    value={resetPassword}
+                    onChange={(event) => setResetPassword(event.target.value)}
+                    placeholder={editingUser.isAdmin ? "Enter new password" : undefined}
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => setShowResetPassword((value) => !value)}
+                  >
+                    {showResetPassword ? "Hide" : "Show"}
+                  </Button>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={handleResetPassword}
+                    disabled={resetPassword.trim().length < 6}
+                  >
+                    Set Password
+                  </Button>
+                  {resetStatus ? (
+                    <p className="text-sm text-slate-500">{resetStatus}</p>
+                  ) : null}
+                </div>
+              </div>
             ) : null}
             <div className="space-y-2">
               <Label>Name</Label>
@@ -2820,77 +3117,53 @@ function UsersPanel({
                 }
               />
             </div>
-            <div className="space-y-2">
-              <Label>Email</Label>
-              <Input
-                value={form.email}
-                onChange={(event) =>
-                  setForm((prev) => ({ ...prev, email: event.target.value }))
-                }
-                readOnly={Boolean(editingUser)}
-                className={editingUser ? "bg-slate-50" : undefined}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>Position</Label>
-              <Input
-                value={form.position}
-                onChange={(event) =>
-                  setForm((prev) => ({ ...prev, position: event.target.value }))
-                }
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>Employee ID</Label>
-              <Input
-                value={form.employeeId}
-                onChange={(event) =>
-                  setForm((prev) => ({
-                    ...prev,
-                    employeeId: event.target.value,
-                  }))
-                }
-              />
-            </div>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-2">
-                <Label>Normal Rate (RM)</Label>
-                <Input
-                  value={form.normalRate}
-                  onChange={(event) =>
-                    setForm((prev) => ({
-                      ...prev,
-                      normalRate: event.target.value,
-                    }))
-                  }
-                />
-              </div>
-              <div className="space-y-2">
-                <Label>OT Rate (RM)</Label>
-                <Input
-                  value={form.otRate}
-                  onChange={(event) =>
-                    setForm((prev) => ({
-                      ...prev,
-                      otRate: event.target.value,
-                    }))
-                  }
-                />
-              </div>
-            </div>
-            {!editingUser ? (
-              <div className="space-y-2">
-                <Label>Temp Password</Label>
-                <Input
-                  value={form.tempPassword}
-                  onChange={(event) =>
-                    setForm((prev) => ({
-                      ...prev,
-                      tempPassword: event.target.value,
-                    }))
-                  }
-                />
-              </div>
+            {!isAdminEdit ? (
+              <>
+                <div className="space-y-2">
+                  <Label>Phone (optional)</Label>
+                  <Input
+                    value={form.phone}
+                    onChange={(event) =>
+                      setForm((prev) => ({ ...prev, phone: event.target.value }))
+                    }
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>Passport</Label>
+                  <Input
+                    value={form.passport}
+                    onChange={(event) =>
+                      setForm((prev) => ({ ...prev, passport: event.target.value }))
+                    }
+                  />
+                </div>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label>Normal Rate (RM)</Label>
+                    <Input
+                      value={form.normalRate}
+                      onChange={(event) =>
+                        setForm((prev) => ({
+                          ...prev,
+                          normalRate: event.target.value,
+                        }))
+                      }
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>OT Rate (RM)</Label>
+                    <Input
+                      value={form.otRate}
+                      onChange={(event) =>
+                        setForm((prev) => ({
+                          ...prev,
+                          otRate: event.target.value,
+                        }))
+                      }
+                    />
+                  </div>
+                </div>
+              </>
             ) : null}
             {status ? (
               <p className="rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-600">
@@ -2908,29 +3181,6 @@ function UsersPanel({
             >
               Cancel
             </Button>
-            {editingUser ? (
-              <AlertDialog>
-                <AlertDialogTrigger asChild>
-                  <Button variant="outline">Reset Password</Button>
-                </AlertDialogTrigger>
-                <AlertDialogContent>
-                  <AlertDialogHeader>
-                    <AlertDialogTitle>Send password reset?</AlertDialogTitle>
-                    <AlertDialogDescription>
-                      Send a reset link to {editingUser.email}?
-                    </AlertDialogDescription>
-                  </AlertDialogHeader>
-                  <AlertDialogFooter>
-                    <AlertDialogCancel>No</AlertDialogCancel>
-                    <AlertDialogAction
-                      onClick={() => handleResetPassword(editingUser.email)}
-                    >
-                      Yes
-                    </AlertDialogAction>
-                  </AlertDialogFooter>
-                </AlertDialogContent>
-              </AlertDialog>
-            ) : null}
             <Button onClick={handleSave} disabled={saving}>
               {saving ? "Saving..." : "Save"}
             </Button>
@@ -2952,6 +3202,7 @@ function UsersPanel({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
     </Card>
   );
 }
@@ -3011,7 +3262,7 @@ function UsersPanel({
       if (!token) return true;
       return (
         session.userName.toLowerCase().includes(token) ||
-        session.userEmail.toLowerCase().includes(token)
+        session.userId.toLowerCase().includes(token)
       );
     });
   }, [sessions, search, dateFilter]);
@@ -3058,10 +3309,45 @@ function UsersPanel({
     }
   };
 
+  const handleExportCsv = () => {
+    if (filtered.length === 0) return;
+    const headers = ["Name", "User ID", "Date", "Check-in", "Buffer", "Reason"];
+    const csvRows = [
+      headers.join(","),
+      ...filtered.map((session) => {
+        const values = [
+          session.userName,
+          session.userId,
+          formatDateKeyLabel(session.dateKey),
+          session.checkInTime ? format(session.checkInTime.toDate(), "p") : "",
+          lateBuffer !== null ? `${lateBuffer} min` : "",
+          session.lateNote ?? session.lateReason ?? "",
+        ];
+        return values
+          .map((value) => `"${String(value).replace(/"/g, '""')}"`)
+          .join(",");
+      }),
+    ];
+    const blob = new Blob([csvRows.join("\n")], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "late-sessions.csv";
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <Card>
-      <CardHeader>
+      <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <CardTitle>Late</CardTitle>
+        <Button
+          variant="outline"
+          onClick={handleExportCsv}
+          disabled={filtered.length === 0}
+        >
+          Export CSV
+        </Button>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="grid gap-4 sm:grid-cols-2">
@@ -3070,7 +3356,7 @@ function UsersPanel({
             <Input
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="name or email"
+              placeholder="name or user ID"
             />
           </div>
           <div className="space-y-2">
@@ -3095,19 +3381,19 @@ function UsersPanel({
             <TableHeader>
               <TableRow>
                 <TableHead>Name</TableHead>
-                <TableHead>Email</TableHead>
+                <TableHead>User ID</TableHead>
                 <TableHead>Date</TableHead>
                 <TableHead>Check-in</TableHead>
                 <TableHead>Buffer</TableHead>
                 <TableHead>Reason</TableHead>
                 <TableHead>Actions</TableHead>
               </TableRow>
-              </TableHeader>
-              <TableBody>
-                {pagedSessions.map((session) => (
-                  <TableRow key={session.id}>
+            </TableHeader>
+            <TableBody>
+              {pagedSessions.map((session) => (
+                <TableRow key={session.id}>
                   <TableCell>{session.userName}</TableCell>
-                  <TableCell>{session.userEmail}</TableCell>
+                  <TableCell>{session.userId}</TableCell>
                   <TableCell>{formatDateKeyLabel(session.dateKey)}</TableCell>
                   <TableCell>
                     {session.checkInTime
@@ -3256,7 +3542,7 @@ function AbnormalPanel() {
       if (!token) return true;
       return (
         session.userName.toLowerCase().includes(token) ||
-        session.userEmail.toLowerCase().includes(token)
+        session.userId.toLowerCase().includes(token)
       );
     });
   }, [sessions, search, dateFilter]);
@@ -3305,10 +3591,55 @@ function AbnormalPanel() {
     }
   };
 
+  const handleExportCsv = () => {
+    if (filtered.length === 0) return;
+    const headers = [
+      "Name",
+      "User ID",
+      "Date",
+      "Check-in",
+      "Check-out",
+      "Reason",
+    ];
+    const csvRows = [
+      headers.join(","),
+      ...filtered.map((session) => {
+        const values = [
+          session.userName,
+          session.userId,
+          formatDateKeyLabel(session.dateKey),
+          session.checkInTime ? format(session.checkInTime.toDate(), "p") : "",
+          session.checkOutTime ? format(session.checkOutTime.toDate(), "p") : "",
+          session.abnormalNote ??
+            (session.abnormalReasons?.length
+              ? session.abnormalReasons.join(", ")
+              : ""),
+        ];
+        return values
+          .map((value) => `"${String(value).replace(/"/g, '""')}"`)
+          .join(",");
+      }),
+    ];
+    const blob = new Blob([csvRows.join("\n")], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "abnormal-sessions.csv";
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <Card>
-      <CardHeader>
+      <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <CardTitle>Abnormal</CardTitle>
+        <Button
+          variant="outline"
+          onClick={handleExportCsv}
+          disabled={filtered.length === 0}
+        >
+          Export CSV
+        </Button>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="grid gap-4 sm:grid-cols-2">
@@ -3317,7 +3648,7 @@ function AbnormalPanel() {
             <Input
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="name or email"
+              placeholder="name or user ID"
             />
           </div>
           <div className="space-y-2">
@@ -3342,19 +3673,19 @@ function AbnormalPanel() {
             <TableHeader>
               <TableRow>
                 <TableHead>Name</TableHead>
-                <TableHead>Email</TableHead>
+                <TableHead>User ID</TableHead>
                 <TableHead>Date</TableHead>
                 <TableHead>Check-in</TableHead>
                 <TableHead>Check-out</TableHead>
                 <TableHead>Reason</TableHead>
                 <TableHead>Actions</TableHead>
               </TableRow>
-              </TableHeader>
-              <TableBody>
-                {pagedSessions.map((session) => (
-                  <TableRow key={session.id}>
+            </TableHeader>
+            <TableBody>
+              {pagedSessions.map((session) => (
+                <TableRow key={session.id}>
                   <TableCell>{session.userName}</TableCell>
-                  <TableCell>{session.userEmail}</TableCell>
+                  <TableCell>{session.userId}</TableCell>
                   <TableCell>{formatDateKeyLabel(session.dateKey)}</TableCell>
                   <TableCell>
                     {session.checkInTime
@@ -3558,7 +3889,7 @@ function MaintenancePanel() {
               />
             </div>
             <div className="space-y-2">
-              <Label>Early Check-out Buffer (5pm)</Label>
+              <Label>Normal Early Check-out Buffer (5pm)</Label>
               <Input
                 value={earlyCheckoutBuffer}
                 onChange={(event) => setEarlyCheckoutBuffer(event.target.value)}

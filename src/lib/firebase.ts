@@ -1,5 +1,5 @@
 import { initializeApp } from "firebase/app";
-import { getAuth } from "firebase/auth";
+import { browserLocalPersistence, getAuth, setPersistence } from "firebase/auth";
 import { getFunctions } from "firebase/functions";
 import { getFirestore } from "firebase/firestore";
 
@@ -20,5 +20,9 @@ if (!firebaseConfig.apiKey) {
 const app = initializeApp(firebaseConfig);
 
 export const auth = getAuth(app);
+void setPersistence(auth, browserLocalPersistence).catch((error) => {
+  // eslint-disable-next-line no-console
+  console.warn("Failed to set auth persistence", error);
+});
 export const db = getFirestore(app);
 export const functions = getFunctions(app);

@@ -340,6 +340,9 @@ export function UserDashboard() {
                   <p className="text-base font-semibold text-slate-900">
                     {profile?.name ?? "User"}
                   </p>
+                  <p className="text-xs text-slate-500">
+                    User ID: {profile?.userId ?? user?.uid ?? "-"}
+                  </p>
                 </div>
               </div>
               <button
@@ -370,18 +373,6 @@ export function UserDashboard() {
                 }}
               >
                 Recent Sessions
-              </Button>
-            </div>
-            <div className="mt-3">
-              <Button
-                variant="outline"
-                className="w-full"
-                onClick={() => {
-                  setDrawerOpen(false);
-                  navigate("/reset-password");
-                }}
-              >
-                Reset Password
               </Button>
             </div>
             <div className="mt-6">

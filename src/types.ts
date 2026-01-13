@@ -2,14 +2,14 @@ import type { Timestamp } from "firebase/firestore";
 
 export type UserProfile = {
   uid: string;
-  email: string;
+  userId: string;
   name: string;
-  position?: string;
-  employeeId?: string;
+  phone?: string;
+  passport?: string;
+  displayPassword?: string;
   normalRate?: number;
   otRate?: number;
   isDeleted?: boolean;
-  phone?: string;
   isAdmin: boolean;
   lastLoginAt?: Timestamp | null;
 };
@@ -28,7 +28,6 @@ export type SiteItem = {
 export type AttendanceLog = {
   id: string;
   userId: string;
-  userEmail: string;
   userName?: string;
   siteId: string;
   siteName: string;
@@ -46,10 +45,8 @@ export type AttendanceLog = {
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
   updatedBy?: string;
-  updatedByEmail?: string;
   deletedAt?: Timestamp;
   deletedBy?: string;
-  deletedByEmail?: string;
   adminNote?: string;
   searchPrefixes?: string[];
 };
@@ -57,7 +54,6 @@ export type AttendanceLog = {
 export type AttendanceSession = {
   id: string;
   userId: string;
-  userEmail: string;
   userName: string;
   siteId?: string;
   siteName?: string;

@@ -6,7 +6,6 @@ import { UserDashboard } from "./pages/UserDashboard";
 import { AdminDashboard } from "./pages/AdminDashboard";
 import { ScannerPage } from "./pages/ScannerPage";
 import { RecentSessionsPage } from "./pages/RecentSessionsPage";
-import { ResetPasswordPage } from "./pages/ResetPasswordPage";
 
 function HomeRedirect() {
     const { user, profile, loading } = useAuth();
@@ -20,6 +19,14 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
     const { user, loading } = useAuth();
     if (loading) return <LoadingScreen message="Loading account..." />;
     if (!user) return <Navigate to="/auth" replace />;
+    return <>{children}</>;
+}
+
+function RequireUser({ children }: { children: React.ReactNode }) {
+    const { user, profile, loading } = useAuth();
+    if (loading) return <LoadingScreen message="Loading account..." />;
+    if (!user) return <Navigate to="/auth" replace />;
+    if (profile?.isAdmin) return <Navigate to="/admin" replace />;
     return <>{children}</>;
 }
 
@@ -40,9 +47,9 @@ export default function App() {
                     <Route
                         path="/user"
                         element={
-                            <RequireAuth>
+                            <RequireUser>
                                 <UserDashboard />
-                            </RequireAuth>
+                            </RequireUser>
                         }
                     />
                     <Route
@@ -68,14 +75,6 @@ export default function App() {
             element={
               <RequireAuth>
                 <RecentSessionsPage />
-              </RequireAuth>
-            }
-          />
-          <Route
-            path="/reset-password"
-            element={
-              <RequireAuth>
-                <ResetPasswordPage />
               </RequireAuth>
             }
           />

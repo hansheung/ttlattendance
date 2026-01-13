@@ -1,12 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import {
-  collection,
-  getDocs,
-  orderBy,
-  query,
-  where,
-} from "firebase/firestore";
+import { collection, getDocs, orderBy, query, where } from "firebase/firestore";
 import { format } from "date-fns";
 import { db } from "../lib/firebase";
 import { useAuth } from "../contexts/AuthContext";
@@ -28,6 +22,8 @@ import { Badge } from "../components/ui/badge";
 import { formatCurrencyRM, formatHoursMinutes } from "../lib/utils";
 import type { AttendanceSession, SiteItem } from "../types";
 
+const SESSION_PAGE_SIZE = 10;
+
 export function RecentSessionsPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
@@ -37,8 +33,10 @@ export function RecentSessionsPage() {
   const [error, setError] = useState<string | null>(null);
   const [dateStart, setDateStart] = useState("");
   const [dateEnd, setDateEnd] = useState("");
-  const [locationFilter, setLocationFilter] = useState("all");
+  const [siteInFilter, setSiteInFilter] = useState("all");
+  const [siteOutFilter, setSiteOutFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [pageIndex, setPageIndex] = useState(0);
 
   useEffect(() => {
     const fetchLocations = async () => {
@@ -64,16 +62,18 @@ export function RecentSessionsPage() {
       setLoading(true);
       setError(null);
 
-      const constraints: any[] = [
-        where("userId", "==", user.uid),
-        orderBy("checkInTime", "desc"),
-      ];
+      const constraints: any[] = [where("userId", "==", user.uid)];
 
-      if (locationFilter !== "all") {
-        constraints.push(where("siteId", "==", locationFilter));
+      if (siteInFilter !== "all") {
+        constraints.push(where("siteInId", "==", siteInFilter));
       }
-      if (statusFilter !== "all") {
-        constraints.push(where("status", "==", statusFilter));
+      if (siteOutFilter !== "all") {
+        constraints.push(where("siteOutId", "==", siteOutFilter));
+      }
+      if (statusFilter === "complete") {
+        constraints.push(where("status", "==", "complete"));
+      } else if (statusFilter === "abnormal") {
+        constraints.push(where("isAbnormal", "==", true));
       }
       if (dateStart) {
         const startDate = new Date(dateStart);
@@ -85,6 +85,7 @@ export function RecentSessionsPage() {
         endDate.setHours(23, 59, 59, 999);
         constraints.push(where("checkInTime", "<=", endDate));
       }
+      constraints.push(orderBy("checkInTime", "desc"));
 
       try {
         const snapshot = await getDocs(
@@ -105,7 +106,26 @@ export function RecentSessionsPage() {
       }
     };
     fetchSessions();
-  }, [user, dateStart, dateEnd, locationFilter, statusFilter]);
+  }, [user, dateStart, dateEnd, siteInFilter, siteOutFilter, statusFilter]);
+
+  const pageCount = Math.max(
+    1,
+    Math.ceil(sessions.length / SESSION_PAGE_SIZE),
+  );
+  const pagedSessions = useMemo(() => {
+    const start = pageIndex * SESSION_PAGE_SIZE;
+    return sessions.slice(start, start + SESSION_PAGE_SIZE);
+  }, [sessions, pageIndex]);
+
+  useEffect(() => {
+    setPageIndex(0);
+  }, [dateStart, dateEnd, siteInFilter, siteOutFilter, statusFilter]);
+
+  useEffect(() => {
+    if (pageIndex >= pageCount) {
+      setPageIndex(Math.max(0, pageCount - 1));
+    }
+  }, [pageCount, pageIndex]);
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -121,11 +141,11 @@ export function RecentSessionsPage() {
         <Card>
           <CardContent className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 pt-6">
             <div className="space-y-2">
-              <Label>Site</Label>
+              <Label>Site-in</Label>
               <div className="sm:hidden">
                 <select
-                  value={locationFilter}
-                  onChange={(event) => setLocationFilter(event.target.value)}
+                  value={siteInFilter}
+                  onChange={(event) => setSiteInFilter(event.target.value)}
                   className="flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900 focus:ring-offset-2"
                 >
                   <option value="all">All</option>
@@ -138,8 +158,43 @@ export function RecentSessionsPage() {
               </div>
               <div className="hidden sm:block">
                 <Select
-                  value={locationFilter}
-                  onValueChange={setLocationFilter}
+                  value={siteInFilter}
+                  onValueChange={setSiteInFilter}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="All" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All</SelectItem>
+                    {locations.map((locationItem) => (
+                      <SelectItem key={locationItem.id} value={locationItem.id}>
+                        {locationItem.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>Site-out</Label>
+              <div className="sm:hidden">
+                <select
+                  value={siteOutFilter}
+                  onChange={(event) => setSiteOutFilter(event.target.value)}
+                  className="flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900 focus:ring-offset-2"
+                >
+                  <option value="all">All</option>
+                  {locations.map((locationItem) => (
+                    <option key={locationItem.id} value={locationItem.id}>
+                      {locationItem.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="hidden sm:block">
+                <Select
+                  value={siteOutFilter}
+                  onValueChange={setSiteOutFilter}
                 >
                   <SelectTrigger>
                     <SelectValue placeholder="All" />
@@ -165,7 +220,7 @@ export function RecentSessionsPage() {
                 >
                   <option value="all">All</option>
                   <option value="complete">Complete</option>
-                  <option value="incomplete">Incomplete</option>
+                  <option value="abnormal">Abnormal</option>
                 </select>
               </div>
               <div className="hidden sm:block">
@@ -179,7 +234,7 @@ export function RecentSessionsPage() {
                   <SelectContent>
                     <SelectItem value="all">All</SelectItem>
                     <SelectItem value="complete">Complete</SelectItem>
-                    <SelectItem value="incomplete">Incomplete</SelectItem>
+                    <SelectItem value="abnormal">Abnormal</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -204,7 +259,8 @@ export function RecentSessionsPage() {
               <Button
                 variant="ghost"
                 onClick={() => {
-                  setLocationFilter("all");
+                  setSiteInFilter("all");
+                  setSiteOutFilter("all");
                   setStatusFilter("all");
                   setDateStart("");
                   setDateEnd("");
@@ -233,30 +289,38 @@ export function RecentSessionsPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Site</TableHead>
-                    <TableHead>Check-in</TableHead>
-                    <TableHead>Check-out</TableHead>
-                    <TableHead>Hours</TableHead>
+                    <TableHead>Date</TableHead>
+                    <TableHead>Site-in</TableHead>
+                    <TableHead>In</TableHead>
+                    <TableHead>Site-out</TableHead>
+                    <TableHead>Out</TableHead>
+                    <TableHead>Total Hours</TableHead>
                     <TableHead>Amount</TableHead>
                     <TableHead>Status</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {sessions.map((session) => (
+                  {pagedSessions.map((session) => (
                     <TableRow key={session.id}>
                       <TableCell>
-                        {session.siteInName ??
-                          session.siteName ??
-                          "-"}
+                        {session.checkInTime
+                          ? format(session.checkInTime.toDate(), "PP")
+                          : session.dateKey ?? "-"}
+                      </TableCell>
+                      <TableCell>
+                        {session.siteInName ?? session.siteName ?? "-"}
                       </TableCell>
                       <TableCell>
                         {session.checkInTime
-                          ? format(session.checkInTime.toDate(), "PPpp")
+                          ? format(session.checkInTime.toDate(), "p")
                           : "-"}
                       </TableCell>
                       <TableCell>
+                        {session.siteOutName ?? session.siteName ?? "-"}
+                      </TableCell>
+                      <TableCell>
                         {session.checkOutTime
-                          ? format(session.checkOutTime.toDate(), "PPpp")
+                          ? format(session.checkOutTime.toDate(), "p")
                           : "-"}
                       </TableCell>
                       <TableCell>
@@ -268,7 +332,9 @@ export function RecentSessionsPage() {
                           : "-"}
                       </TableCell>
                       <TableCell>
-                        {session.status === "complete" ? (
+                        {session.isAbnormal ? (
+                          <Badge variant="destructive">Abnormal</Badge>
+                        ) : session.status === "complete" ? (
                           <Badge variant="success">Complete</Badge>
                         ) : (
                           <Badge variant="secondary">Incomplete</Badge>
@@ -279,6 +345,36 @@ export function RecentSessionsPage() {
                 </TableBody>
               </Table>
             )}
+            {sessions.length > 0 ? (
+              <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-sm text-slate-500">
+                  Total sessions: {sessions.length}
+                </p>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setPageIndex((prev) => Math.max(prev - 1, 0))}
+                    disabled={pageIndex === 0}
+                  >
+                    Prev
+                  </Button>
+                  <span className="text-sm text-slate-500">
+                    Page {pageIndex + 1} of {pageCount}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      setPageIndex((prev) => Math.min(prev + 1, pageCount - 1))
+                    }
+                    disabled={pageIndex + 1 >= pageCount}
+                  >
+                    Next
+                  </Button>
+                </div>
+              </div>
+            ) : null}
           </CardContent>
         </Card>
       </main>

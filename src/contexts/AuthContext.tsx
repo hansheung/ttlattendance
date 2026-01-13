@@ -24,13 +24,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const snapshot = await getDoc(docRef);
     if (snapshot.exists()) {
       const data = snapshot.data() as Omit<UserProfile, "uid"> & {
+        userId?: string;
         phone?: string | null;
         lastLoginAt?: UserProfile["lastLoginAt"] | null;
       };
       setProfile({
         uid,
-        ...data,
+        userId: data.userId ?? uid,
+        name: data.name,
         phone: data.phone ?? undefined,
+        normalRate: data.normalRate,
+        otRate: data.otRate,
+        isDeleted: data.isDeleted,
+        isAdmin: data.isAdmin,
         lastLoginAt: data.lastLoginAt ?? undefined,
       });
     } else {
@@ -52,13 +58,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         unsubscribeProfile = onSnapshot(docRef, (snapshot) => {
           if (snapshot.exists()) {
             const data = snapshot.data() as Omit<UserProfile, "uid"> & {
+              userId?: string;
               phone?: string | null;
               lastLoginAt?: UserProfile["lastLoginAt"] | null;
             };
             setProfile({
               uid: firebaseUser.uid,
-              ...data,
+              userId: data.userId ?? firebaseUser.uid,
+              name: data.name,
               phone: data.phone ?? undefined,
+              normalRate: data.normalRate,
+              otRate: data.otRate,
+              isDeleted: data.isDeleted,
+              isAdmin: data.isAdmin,
               lastLoginAt: data.lastLoginAt ?? undefined,
             });
           } else {
